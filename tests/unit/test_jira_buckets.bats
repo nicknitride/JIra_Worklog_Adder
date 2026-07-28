@@ -27,3 +27,11 @@ setup() {
     jira_ticket_in_known_lists "DEVELOPMNT-99"
     ! jira_ticket_in_known_lists "OTHER-1"
 }
+
+@test "jira_register_manual_subtasks tracks keys for out-of-bucket checks" {
+    JIRA_MANUAL_SUBTASK_KEYS=()
+    jira_register_manual_subtasks '[{"key":"TRIBE06-10","summary":"Task A"},{"key":"TRIBE06-11","summary":"Task B"}]'
+    jira_ticket_in_known_lists "TRIBE06-10"
+    jira_ticket_in_known_lists "TRIBE06-11"
+    ! jira_ticket_in_known_lists "TRIBE06-12"
+}

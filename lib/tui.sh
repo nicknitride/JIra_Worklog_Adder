@@ -352,13 +352,11 @@ tui_pick_ticket() {
     fi
 
     if [[ "$ticket_count" -eq 0 ]]; then
-        manual="$(gum input --placeholder "Enter Jira ticket key (e.g. TRIBE06-67802)")"
-        worklog_audit "INFO" "tui.ticket.manual" "$manual" "selected" "event=${event_title}"
-        TUI_PICKED_TICKET="$manual"
+        tui_manual_parent_subtask_pick "$event_title"
         return 0
     fi
 
-    TUI_PICK_OPTIONS+=("Enter ticket key manually...${TUI_PICK_VALUE_DELIM}__manual__")
+    TUI_PICK_OPTIONS+=("Enter parent ticket key...${TUI_PICK_VALUE_DELIM}__manual__")
     header="Assign ticket for: ${event_title}"
 
     while true; do
@@ -369,9 +367,7 @@ tui_pick_ticket() {
         [[ -z "$ticket_key" ]] && continue
 
         if [[ "$ticket_key" == "__manual__" ]]; then
-            manual="$(gum input --placeholder "TRIBE06-12345")"
-            TUI_PICKED_TICKET="$manual"
-            worklog_audit "INFO" "tui.ticket.manual" "$manual" "selected" "event=${event_title}"
+            tui_manual_parent_subtask_pick "$event_title"
             return 0
         fi
 
@@ -387,6 +383,63 @@ tui_validate_ticket_key() {
         [A-Z]*-[0-9]*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# Manual parent key → show summary → pick a subtask for worklogging.
+tui_manual_parent_subtask_pick() {
+    local event_title="$1"
+    local parent_key parent_summary subtasks_json count choice ticket_key fetched
+
+    while true; do
+        parent_key="$(gum input --placeholder "Enter Jira ticket key (e.g. TRIBE06-67802)")"
+        parent_key="$(printf '%s' "$parent_key" | awk '{print $1}')"
+        [[ -z "$parent_key" ]] && return 0
+
+        if ! tui_validate_ticket_key "$parent_key"; then
+            tui_display $TUI_THEME --foreground "#FF6600" "Invalid ticket key: ${parent_key}"
+            continue
+        fi
+
+        if ! fetched="$(jira_fetch_subtasks_for_parent "$parent_key" "manual/${parent_key}")"; then
+            tui_display $TUI_THEME --foreground "#FF6600" \
+                "Could not fetch ${parent_key}. Check the key and try again."
+            continue
+        fi
+
+        parent_summary="$(printf '%s' "$fetched" | head -n1)"
+        subtasks_json="$(printf '%s' "$fetched" | tail -n +2)"
+        count="$(printf '%s' "$subtasks_json" | jq 'length')"
+
+        tui_println
+        tui_display $TUI_THEME --bold "${parent_key} — ${parent_summary}"
+
+        if [[ "$count" -eq 0 ]]; then
+            tui_display $TUI_THEME --foreground "#FF6600" \
+                "No subtasks found under ${parent_key}."
+            worklog_audit "WARN" "tui.ticket.manual" "$parent_key" "no_subtasks" "event=${event_title}"
+            if gum confirm "Try a different ticket key?"; then
+                continue
+            fi
+            return 0
+        fi
+
+        jira_register_manual_subtasks "$subtasks_json"
+
+        tui_reset_pick_options
+        tui_append_pick_options "$TUI_THEME_FOREGROUND" "Subtask" "$subtasks_json"
+        choice="$(gum choose --label-delimiter="$TUI_PICK_VALUE_DELIM" \
+            --header "Pick subtask for: ${event_title} (${parent_key})" \
+            "${TUI_PICK_OPTIONS[@]}")" || true
+        [[ -z "$choice" ]] && return 0
+
+        ticket_key="$(tui_parse_pick_choice "$choice")"
+        if [[ -n "$ticket_key" ]]; then
+            TUI_PICKED_TICKET="$ticket_key"
+            worklog_audit "INFO" "tui.ticket.manual" "$ticket_key" "selected" \
+                "parent=${parent_key} event=${event_title}"
+            return 0
+        fi
+    done
 }
 
 tui_check_out_of_buckets() {

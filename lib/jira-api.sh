@@ -7,6 +7,7 @@ JIRA_BUCKET_PARENT_SUMMARY=""
 JIRA_GUILD_TICKETS_JSON="[]"
 JIRA_GUILD_TICKET_KEYS=()
 JIRA_GUILD_BOARD_SUMMARY=""
+JIRA_MANUAL_SUBTASK_KEYS=()
 JIRA_LAST_CURL_ERROR=""
 JIRA_LAST_HTTP_CODE=""
 
@@ -197,10 +198,28 @@ jira_ticket_in_guild_board() {
     return 1
 }
 
+jira_register_manual_subtasks() {
+    local tickets_json="$1"
+    local key
+    while IFS= read -r key; do
+        [[ -n "$key" ]] && JIRA_MANUAL_SUBTASK_KEYS+=("$key")
+    done < <(printf '%s' "$tickets_json" | jq -r '.[].key')
+}
+
+jira_ticket_in_manual_subtasks() {
+    local ticket_key="$1"
+    local key
+    for key in "${JIRA_MANUAL_SUBTASK_KEYS[@]}"; do
+        [[ "$key" == "$ticket_key" ]] && return 0
+    done
+    return 1
+}
+
 jira_ticket_in_known_lists() {
     local ticket_key="$1"
     jira_ticket_in_buckets "$ticket_key" && return 0
     jira_ticket_in_guild_board "$ticket_key" && return 0
+    jira_ticket_in_manual_subtasks "$ticket_key" && return 0
     return 1
 }
 
