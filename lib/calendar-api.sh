@@ -129,7 +129,7 @@ calendar_fetch_events_for_days() {
     # Filter to only events on viable dates (by local date prefix)
     local filtered
     filtered="$(printf '%s' "$all_events" | jq --argjson dates "$(printf '%s\n' "${viable_dates[@]}" | jq -R . | jq -s .)" '
-        [.[] | select(.startTime[0:10] as $d | $dates | index($d))]
+        [.[] | select((.eventDate // .startTime[0:10]) as $d | $dates | index($d))]
     ')"
     CALENDAR_EVENTS_JSON="$filtered"
     printf '%s' "$filtered"

@@ -5,19 +5,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+LOCAL_TZ = ZoneInfo(os.environ.get("TZ", "Asia/Manila"))
 
 
 def _parse_dt(value: str, all_day: bool) -> datetime:
     if all_day:
-        return datetime.strptime(value[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return datetime.strptime(value[:10], "%Y-%m-%d").replace(tzinfo=LOCAL_TZ)
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
-    return datetime.fromisoformat(value)
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _to_local(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(LOCAL_TZ)
 
 
 def _duration_minutes(start: datetime, end: datetime, all_day: bool) -> int:
@@ -45,11 +57,14 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     end_dt = _parse_dt(end_val, all_day)
     if all_day and end_val:
         end_dt = end_dt - timedelta(seconds=1)
+    start_local = _to_local(start_dt)
+    end_local = _to_local(end_dt)
     return {
         "id": event.get("id", ""),
         "title": event.get("summary", "(no title)"),
-        "startTime": start_dt.isoformat(),
-        "endTime": end_dt.isoformat(),
+        "eventDate": start_local.date().isoformat(),
+        "startTime": start_local.isoformat(),
+        "endTime": end_local.isoformat(),
         "durationMinutes": _duration_minutes(start_dt, end_dt, all_day),
         "responseStatus": _response_status(event),
         "allDay": all_day,
@@ -112,9 +127,10 @@ def cmd_events(args: argparse.Namespace) -> int:
             creds.refresh(Request())
 
         service = build("calendar", "v3", credentials=creds, cache_discovery=False)
-        time_min = datetime.combine(date.fromisoformat(args.date_from), datetime.min.time()).isoformat() + "Z"
+        start_date = date.fromisoformat(args.date_from)
         end_date = date.fromisoformat(args.date_to) + timedelta(days=1)
-        time_max = datetime.combine(end_date, datetime.min.time()).isoformat() + "Z"
+        time_min = datetime.combine(start_date, datetime.min.time(), tzinfo=LOCAL_TZ).isoformat()
+        time_max = datetime.combine(end_date, datetime.min.time(), tzinfo=LOCAL_TZ).isoformat()
         result = (
             service.events()
             .list(

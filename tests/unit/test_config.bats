@@ -64,6 +64,22 @@ EOF
     [[ "$JIRA_BUCKET_PARENT_KEY" == "TRIBE06-67802" ]]
 }
 
+@test "config_validate passes with optional guild board" {
+    cat > "$WORKLOG_ENV_FILE" <<EOF
+ATLASSIAN_EMAIL=user@mynt.xyz
+ATLASSIAN_API_TOKEN=ATATTreal-token
+ATLASSIAN_BASE_URL=https://myntfintech.atlassian.net
+GOOGLE_CLIENT_ID=123456.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-real-secret
+JIRA_BUCKET_PARENT=https://myntfintech.atlassian.net/browse/TRIBE06-67802
+JIRA_GUILD_BOARD=https://myntfintech.atlassian.net/browse/DEVELOPMNT-15646
+EOF
+    config_load_dotenv "$WORKLOG_ENV_FILE"
+    run config_validate
+    [[ "$status" -eq 0 ]]
+    [[ "$JIRA_GUILD_BOARD_KEY" == "DEVELOPMNT-15646" ]]
+}
+
 @test "config_parse_jira_issue_ref accepts browse URL" {
     key="$(config_parse_jira_issue_ref "https://myntfintech.atlassian.net/browse/TRIBE06-67802")"
     [[ "$key" == "TRIBE06-67802" ]]

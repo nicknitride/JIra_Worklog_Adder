@@ -127,7 +127,16 @@ worklog_main() {
     if ! jira_fetch_bucket_tickets; then
         exit 5
     fi
-    tui_bucket_tickets "$JIRA_BUCKET_TICKETS_JSON"
+
+    if tui_guild_board_configured; then
+        if ! jira_fetch_guild_board_tickets; then
+            exit 5
+        fi
+    else
+        JIRA_GUILD_TICKETS_JSON="[]"
+    fi
+
+    tui_worklog_tickets_overview "$JIRA_BUCKET_TICKETS_JSON" "$JIRA_GUILD_TICKETS_JSON"
 
     # US2: Day selection
     local week_range week_start week_end
@@ -145,11 +154,19 @@ worklog_main() {
     tui_event_selection "$events_json"
     local selected_events="$TUI_SELECTED_EVENTS_JSON"
 
+    local submit_exit=0
     if [[ "$(printf '%s' "$selected_events" | jq 'length')" -gt 0 ]]; then
-        tui_map_and_submit "$selected_events" "$JIRA_BUCKET_TICKETS_JSON" || {
-            exit_code=$?
-            [[ $exit_code -eq 4 ]] && exit 4
-        }
+        tui_map_and_submit "$selected_events" "$JIRA_BUCKET_TICKETS_JSON" "$JIRA_GUILD_TICKETS_JSON" || \
+            submit_exit=$?
+        if [[ "$submit_exit" -eq 4 ]]; then
+            exit 4
+        fi
+        if [[ "$submit_exit" -eq 5 ]]; then
+            worklog_audit "ERROR" "session.end" "worklog-tui" "failure" \
+                "log=${WORKLOG_SESSION_LOG} submit_failed=true"
+            worklog_progress "session" "failed" "log file: ${WORKLOG_SESSION_LOG}"
+            exit 5
+        fi
     else
         tui_display $TUI_THEME "No events selected. Exiting without submitting worklogs."
         worklog_audit "INFO" "tui.submit" "worklogs" "skipped" "no events selected"

@@ -4,6 +4,11 @@
 JIRA_BUCKET_TICKETS_JSON="[]"
 JIRA_BUCKET_TICKET_KEYS=()
 JIRA_BUCKET_PARENT_SUMMARY=""
+JIRA_GUILD_TICKETS_JSON="[]"
+JIRA_GUILD_TICKET_KEYS=()
+JIRA_GUILD_BOARD_SUMMARY=""
+JIRA_LAST_CURL_ERROR=""
+JIRA_LAST_HTTP_CODE=""
 
 jira_curl() {
     local method="$1"
@@ -17,10 +22,23 @@ jira_curl() {
     if [[ -n "$data" ]]; then
         args+=(-d "$data")
     fi
-    local response http_code body
-    response="$(curl "${args[@]}" "$url")"
+    local response http_code body curl_exit curl_stderr_file
+    JIRA_LAST_CURL_ERROR=""
+    JIRA_LAST_HTTP_CODE=""
+    curl_stderr_file="$(mktemp "${TMPDIR:-/tmp}/worklog-jira-curl.XXXXXX")"
+    curl_exit=0
+    response="$(curl "${args[@]}" "$url" 2>"$curl_stderr_file")" || curl_exit=$?
+    if [[ -s "$curl_stderr_file" ]]; then
+        JIRA_LAST_CURL_ERROR="$(tr '\n' ' ' < "$curl_stderr_file" | sed 's/[[:space:]]*$//')"
+    fi
+    rm -f "$curl_stderr_file"
     http_code="$(printf '%s' "$response" | tail -n1)"
     body="$(printf '%s' "$response" | sed '$d')"
+    JIRA_LAST_HTTP_CODE="$http_code"
+    if [[ "$curl_exit" -ne 0 || "$http_code" == "000" ]]; then
+        worklog_audit "WARN" "jira.curl" "$path" "transport_error" \
+            "curl_exit=${curl_exit} http=${http_code} err=${JIRA_LAST_CURL_ERROR:-none}"
+    fi
     printf '%s\n' "$http_code"
     printf '%s' "$body"
 }
@@ -77,53 +95,86 @@ jira_normalize_bucket_tickets() {
     }]'
 }
 
-jira_fetch_bucket_tickets() {
-    worklog_audit "INFO" "jira.bucket.load" "parent/${JIRA_BUCKET_PARENT_KEY}" "pending" ""
-    local result http_code body count payload
+jira_fetch_subtasks_for_parent() {
+    local parent_key="$1"
+    local audit_label="${2:-subtasks/${parent_key}}"
+    local result http_code body count payload tickets_json parent_summary
 
-    result="$(jira_fetch_with_retry GET "/rest/api/3/issue/${JIRA_BUCKET_PARENT_KEY}?fields=summary,subtasks")"
+    worklog_audit "INFO" "jira.subtasks.load" "$audit_label" "pending" "parent=${parent_key}"
+    result="$(jira_fetch_with_retry GET "/rest/api/3/issue/${parent_key}?fields=summary,subtasks")"
     http_code="$(printf '%s' "$result" | head -n1)"
     body="$(printf '%s' "$result" | tail -n +2)"
 
     if [[ "$http_code" != "200" ]]; then
-        worklog_audit "ERROR" "jira.bucket.load" "parent/${JIRA_BUCKET_PARENT_KEY}" "failure" "HTTP ${http_code}"
-        worklog_error "Failed to fetch parent issue ${JIRA_BUCKET_PARENT_KEY} (HTTP ${http_code})"
+        worklog_audit "ERROR" "jira.subtasks.load" "$audit_label" "failure" "HTTP ${http_code}"
+        worklog_error "Failed to fetch parent issue ${parent_key} (HTTP ${http_code})"
         return 5
     fi
 
-    JIRA_BUCKET_PARENT_SUMMARY="$(printf '%s' "$body" | jq -r '.fields.summary // "unknown"')"
-    worklog_audit "INFO" "jira.bucket.load" "parent/${JIRA_BUCKET_PARENT_KEY}" "success" \
-        "summary=${JIRA_BUCKET_PARENT_SUMMARY}"
+    parent_summary="$(printf '%s' "$body" | jq -r '.fields.summary // "unknown"')"
+    worklog_audit "INFO" "jira.subtasks.load" "$audit_label" "success" "summary=${parent_summary}"
 
-    JIRA_BUCKET_TICKETS_JSON="$(printf '%s' "$body" | jq '[.fields.subtasks[]? | {
+    tickets_json="$(printf '%s' "$body" | jq '[.fields.subtasks[]? | {
         key: .key,
         summary: (.fields.summary // "(no summary)"),
         status: (.fields.status.name // "unknown"),
         inBucket: true
     }]')"
 
-    count="$(printf '%s' "$JIRA_BUCKET_TICKETS_JSON" | jq 'length')"
+    count="$(printf '%s' "$tickets_json" | jq 'length')"
     if [[ "$count" -eq 0 ]]; then
-        payload="$(jq -n --arg parent "$JIRA_BUCKET_PARENT_KEY" \
+        payload="$(jq -n --arg parent "$parent_key" \
             '{jql: ("parent = " + $parent + " ORDER BY key ASC"), maxResults: 100, fields: ["summary", "status"]}')"
         result="$(jira_fetch_with_retry POST "/rest/api/3/search" "$payload")"
         http_code="$(printf '%s' "$result" | head -n1)"
         body="$(printf '%s' "$result" | tail -n +2)"
         if [[ "$http_code" != "200" ]]; then
-            worklog_audit "ERROR" "jira.bucket.filter" "subtasks/${JIRA_BUCKET_PARENT_KEY}" "failure" "HTTP ${http_code}"
-            worklog_error "Failed to search subtasks for ${JIRA_BUCKET_PARENT_KEY} (HTTP ${http_code})"
+            worklog_audit "ERROR" "jira.subtasks.filter" "$audit_label" "failure" "HTTP ${http_code}"
+            worklog_error "Failed to search subtasks for ${parent_key} (HTTP ${http_code})"
             return 5
         fi
-        JIRA_BUCKET_TICKETS_JSON="$(jira_normalize_bucket_tickets "$body")"
-        count="$(printf '%s' "$JIRA_BUCKET_TICKETS_JSON" | jq 'length')"
+        tickets_json="$(jira_normalize_bucket_tickets "$body")"
+        count="$(printf '%s' "$tickets_json" | jq 'length')"
     fi
 
-    worklog_audit "INFO" "jira.bucket.filter" "subtasks/${JIRA_BUCKET_PARENT_KEY}" "success" "count=${count}"
+    worklog_audit "INFO" "jira.subtasks.filter" "$audit_label" "success" "count=${count}"
+    printf '%s\n%s' "$parent_summary" "$tickets_json"
+    return 0
+}
+
+jira_fetch_bucket_tickets() {
+    local fetched parent_summary
+    fetched="$(jira_fetch_subtasks_for_parent "$JIRA_BUCKET_PARENT_KEY" "bucket/${JIRA_BUCKET_PARENT_KEY}")" || return 5
+    parent_summary="$(printf '%s' "$fetched" | head -n1)"
+    JIRA_BUCKET_PARENT_SUMMARY="$parent_summary"
+    JIRA_BUCKET_TICKETS_JSON="$(printf '%s' "$fetched" | tail -n +2)"
 
     JIRA_BUCKET_TICKET_KEYS=()
     while IFS= read -r key; do
         [[ -n "$key" ]] && JIRA_BUCKET_TICKET_KEYS+=("$key")
     done < <(printf '%s' "$JIRA_BUCKET_TICKETS_JSON" | jq -r '.[].key')
+
+    return 0
+}
+
+jira_fetch_guild_board_tickets() {
+    if [[ -z "${JIRA_GUILD_BOARD_KEY:-}" ]]; then
+        JIRA_GUILD_TICKETS_JSON="[]"
+        JIRA_GUILD_TICKET_KEYS=()
+        JIRA_GUILD_BOARD_SUMMARY=""
+        return 0
+    fi
+
+    local fetched parent_summary
+    fetched="$(jira_fetch_subtasks_for_parent "$JIRA_GUILD_BOARD_KEY" "guild/${JIRA_GUILD_BOARD_KEY}")" || return 5
+    parent_summary="$(printf '%s' "$fetched" | head -n1)"
+    JIRA_GUILD_BOARD_SUMMARY="$parent_summary"
+    JIRA_GUILD_TICKETS_JSON="$(printf '%s' "$fetched" | tail -n +2)"
+
+    JIRA_GUILD_TICKET_KEYS=()
+    while IFS= read -r key; do
+        [[ -n "$key" ]] && JIRA_GUILD_TICKET_KEYS+=("$key")
+    done < <(printf '%s' "$JIRA_GUILD_TICKETS_JSON" | jq -r '.[].key')
 
     return 0
 }
@@ -137,15 +188,37 @@ jira_ticket_in_buckets() {
     return 1
 }
 
+jira_ticket_in_guild_board() {
+    local ticket_key="$1"
+    local key
+    for key in "${JIRA_GUILD_TICKET_KEYS[@]}"; do
+        [[ "$key" == "$ticket_key" ]] && return 0
+    done
+    return 1
+}
+
+jira_ticket_in_known_lists() {
+    local ticket_key="$1"
+    jira_ticket_in_buckets "$ticket_key" && return 0
+    jira_ticket_in_guild_board "$ticket_key" && return 0
+    return 1
+}
+
 jira_format_worklog_started() {
     local iso_datetime="$1"
     python3 - "$iso_datetime" <<'PY'
+import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
+local_tz = ZoneInfo(os.environ.get("TZ", "Asia/Manila"))
 dt = datetime.fromisoformat(sys.argv[1])
-offset = dt.strftime("%z") or "+0000"
-print(dt.strftime(f"%Y-%m-%dT%H:%M:%S.000{offset}"))
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+local_dt = dt.astimezone(local_tz)
+offset = local_dt.strftime("%z") or "+0000"
+print(local_dt.strftime(f"%Y-%m-%dT%H:%M:%S.000{offset}"))
 PY
 }
 
@@ -202,6 +275,16 @@ jira_submit_worklog() {
     fi
 
     worklog_audit "ERROR" "jira.worklog.submit" "$issue_key" "failure" "HTTP ${http_code}"
-    worklog_error "Worklog submission failed for ${issue_key} (HTTP ${http_code})"
+    if [[ "$http_code" == "000" ]]; then
+        worklog_error "Worklog submission failed for ${issue_key} (network error — no response from Jira).${JIRA_LAST_CURL_ERROR:+ ${JIRA_LAST_CURL_ERROR}}"
+    else
+        local err_msg
+        err_msg="$(printf '%s' "$body" | jq -r '.errorMessages[0] // .errors | to_entries[0].value // empty' 2>/dev/null || true)"
+        if [[ -n "$err_msg" ]]; then
+            worklog_error "Worklog submission failed for ${issue_key} (HTTP ${http_code}): ${err_msg}"
+        else
+            worklog_error "Worklog submission failed for ${issue_key} (HTTP ${http_code})"
+        fi
+    fi
     return 5
 }

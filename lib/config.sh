@@ -14,6 +14,8 @@ export GOOGLE_REFRESH_TOKEN=""
 export JIRA_PROJECT_KEY="TRIBE06"
 export JIRA_BUCKET_PARENT=""
 export JIRA_BUCKET_PARENT_KEY=""
+export JIRA_GUILD_BOARD=""
+export JIRA_GUILD_BOARD_KEY=""
 export GOOGLE_CALENDAR_ID="primary"
 export GOOGLE_OAUTH_PORT="${GOOGLE_OAUTH_PORT:-8080}"
 
@@ -101,9 +103,19 @@ config_validate() {
         return 2
     }
 
+    JIRA_GUILD_BOARD_KEY=""
+    if [[ -n "${JIRA_GUILD_BOARD:-}" ]]; then
+        JIRA_GUILD_BOARD_KEY="$(config_parse_jira_issue_ref "$JIRA_GUILD_BOARD")" || {
+            worklog_error "Invalid JIRA_GUILD_BOARD: ${JIRA_GUILD_BOARD}"
+            printf 'Use a Jira issue key (e.g. DEVELOPMNT-15646) or browse URL, or leave empty.\n' >&2
+            return 2
+        }
+    fi
+
     export ATLASSIAN_EMAIL ATLASSIAN_API_TOKEN ATLASSIAN_BASE_URL
     export GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REFRESH_TOKEN
-    export JIRA_PROJECT_KEY JIRA_BUCKET_PARENT JIRA_BUCKET_PARENT_KEY GOOGLE_CALENDAR_ID GOOGLE_OAUTH_PORT
+    export JIRA_PROJECT_KEY JIRA_BUCKET_PARENT JIRA_BUCKET_PARENT_KEY
+    export JIRA_GUILD_BOARD JIRA_GUILD_BOARD_KEY GOOGLE_CALENDAR_ID GOOGLE_OAUTH_PORT
     return 0
 }
 

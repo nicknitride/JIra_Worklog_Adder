@@ -19,3 +19,11 @@ setup() {
     [[ "$(printf '%s' "$result" | jq -r '.[0].summary')" == "Standup" ]]
     [[ "$(printf '%s' "$result" | jq -r '.[0].inBucket')" == "true" ]]
 }
+
+@test "jira_ticket_in_known_lists accepts guild and bucket keys" {
+    JIRA_BUCKET_TICKET_KEYS=("TRIBE06-1")
+    JIRA_GUILD_TICKET_KEYS=("DEVELOPMNT-99")
+    jira_ticket_in_known_lists "TRIBE06-1"
+    jira_ticket_in_known_lists "DEVELOPMNT-99"
+    ! jira_ticket_in_known_lists "OTHER-1"
+}
