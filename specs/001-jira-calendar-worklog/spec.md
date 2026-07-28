@@ -19,6 +19,11 @@
 - Q: Which sprint tickets appear as worklog buckets? → A: All tickets in the current sprint, filtered to those labeled with the team's monthly logging label pattern `DLV-133 {YYYY}-{Month}` (e.g., `DLV-133 2026-July`).
 - Q: What text is used for the Jira worklog description? → A: Calendar event title only.
 - Q: Which calendar events appear in the selectable list? → A: Exclude declined/cancelled events; include all-day and tentative events with visual warnings in the TUI.
+- Q: Must the user confirm before audit log files are created? → A: No — launching the tool implicitly authorizes auto-creation of `logs/` and the session log file; no per-session prompt required.
+- Q: Can users adjust worklog duration before submission? → A: No — always use calendar event duration exactly; no manual override.
+- Q: What happens when daily mapped time exceeds 8 hours? → A: Show a warning; user may still confirm and submit worklogs.
+- Q: What if a mapped ticket is no longer in the active sprint? → A: Warn the user and require explicit confirmation before proceeding with that ticket.
+- Q: Where should audit log output be written? → A: Dual channel — step progress on stderr; full timestamped audit trail in `logs/*.txt`.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -122,12 +127,12 @@ each action with timestamps.
 
 **Acceptance Scenarios**:
 
-1. **Given** a new session, **When** the tool starts, **Then** a `logs/` folder is
-   created if absent and a new date-timestamped `.txt` log file is opened for the
-   session.
+1. **Given** a new session, **When** the user launches the tool, **Then** a `logs/` folder is
+   created if absent and a new date-timestamped `.txt` log file is opened automatically
+   without a separate confirmation prompt (launching the tool constitutes consent).
 2. **Given** any user or system action (API call, selection, confirmation, error),
-   **When** the action occurs, **Then** an entry is appended to the log file with
-   an ISO-8601 timestamp and a description of the action and outcome.
+   **When** the action occurs, **Then** a full entry is appended to the session log file
+   with an ISO-8601 timestamp and a step-level summary is emitted to stderr.
 3. **Given** a worklog submission, **When** the user confirms, **Then** the log
    records the ticket key, event title, duration, and submission result.
 
@@ -143,9 +148,11 @@ each action with timestamps.
 - What happens when an API rate limit or network error occurs? The tool retries once,
   then shows a user-friendly error and logs the failure without partial submissions.
 - What happens when a calendar event overlaps another? Both events remain selectable;
-  the user is warned if total mapped time exceeds a reasonable daily threshold (8h).
-- What happens when a ticket is no longer in the active sprint? The tool flags it and
-  requires explicit user override to proceed.
+  the user is warned (non-blocking) if total mapped time for a day exceeds 8 hours;
+  submission may still proceed after confirmation.
+- What happens when a ticket is no longer in the active sprint? The tool flags it,
+  displays a warning, and requires explicit user confirmation before allowing worklog
+  submission to that ticket.
 - What happens when the user runs in dry-run mode? All steps execute except Jira
   worklog creation; the audit log marks entries as `[DRY-RUN]`.
 - What happens when `.env` is missing? The tool exits with an error pointing the
@@ -211,8 +218,13 @@ each action with timestamps.
   ticket bucket (by ticket key such as TRIBE06-67802).
 - **FR-008**: The tool MUST show a summary of all proposed worklog entries and require
   explicit user confirmation before submitting any work to Jira.
-- **FR-009**: The tool MUST derive worklog duration from the calendar event's scheduled
-  time range unless the user adjusts it during review.
+- **FR-008a**: If total mapped duration for any single day exceeds 8 hours, the tool MUST
+  display a non-blocking warning on the submission preview; the user MAY still confirm
+  and submit.
+- **FR-009**: The tool MUST derive worklog duration exclusively from the calendar event's
+  scheduled time range; users MUST NOT be able to manually override duration before submission.
+- **FR-009b**: For all-day events, duration MUST default to 8 hours (480 minutes) when
+  the calendar API returns no timed range.
 - **FR-009a**: The tool MUST set the Jira worklog description to the calendar event
   title exactly as returned from Google Calendar (no prefix or suffix).
 - **FR-010**: The tool MUST present a terminal user interface with a blue color scheme
@@ -220,22 +232,33 @@ each action with timestamps.
 - **FR-011**: The tool MUST display GCash ASCII art on welcome and/or header screens
   where branding or logos appear.
 - **FR-012**: The tool MUST create a `logs/` folder and write all session actions to
-  a date-timestamped `.txt` file (e.g., `logs/2026-07-09T12-30-00-session.txt`).
+  a date-timestamped `.txt` file (e.g., `logs/2026-07-09T12-30-00-session.txt`) on
+  launch without a separate user prompt; running the tool constitutes consent to
+  audit logging.
+- **FR-012a**: The tool MUST use dual logging channels: step-level progress messages
+  on stderr and the complete timestamped audit trail in the session log file under
+  `logs/`.
 - **FR-013**: The tool MUST support a dry-run mode that previews all actions without
   creating Jira worklogs.
 - **FR-014**: The tool MUST allow manual ticket key entry when sprint ticket list
   is empty or the desired ticket is not listed.
+- **FR-014a**: When a mapped ticket is not in the active sprint, the tool MUST display
+  a warning and require explicit user confirmation before submitting a worklog to that
+  ticket.
 
 ### Constitution-Driven Requirements
 
 Per `.specify/memory/constitution.md`:
 
-- **CR-001**: Mutating actions (Jira worklog creation, log file writes) MUST require
-  explicit user verification before execution; dry-run and read-only inspection do not.
+- **CR-001**: Mutating actions (Jira worklog creation, `.env` credential writes) MUST
+  require explicit user verification before execution; session audit log initialization
+  and append-only log entries are pre-authorized by launching the tool; dry-run skips
+  external mutations.
 - **CR-002**: The bash script MUST produce verbose step-level output; `--verbose` or
   `SPECIFY_VERBOSE=1` enables additional trace detail in the TUI footer or stderr.
-- **CR-003**: All actions MUST be logged with ISO-8601 timestamps in the session
-  log file, reflecting every API call, user selection, confirmation, and outcome.
+- **CR-003**: All actions MUST be logged with ISO-8601 timestamps: full detail in the
+  session log file under `logs/`, with step-level summaries on stderr; every API call,
+  user selection, confirmation, and outcome MUST appear in the session log file.
 
 ### Key Entities
 
@@ -282,8 +305,9 @@ Per `.specify/memory/constitution.md`:
 - "Current sprint" refers to the active sprint on the TRIBE06 board (board ID 4912
   per example URL); ticket buckets are all sprint issues labeled with the team's
   monthly logging label (`DLV-133 {YYYY}-{Month}`), not filtered by assignee.
-- Worklog time defaults to the calendar event duration; worklog description defaults
-  to the calendar event title; users may adjust duration during review.
+- Worklog time is always derived from the calendar event duration (no manual adjustment);
+  all-day events without a timed range default to 8 hours; worklog description is the
+  calendar event title.
 - The tool runs locally on macOS/Linux terminals with sufficient size for TUI rendering.
 - Secret values are never written to audit logs; only non-sensitive config names
   may be logged when reporting errors.
@@ -293,3 +317,7 @@ Per `.specify/memory/constitution.md`:
 - Weekend and holiday filtering is manual via the viable-day yes/no toggle (no auto-skip).
 - Declined and cancelled calendar events are never shown; all-day and tentative events
   are shown with TUI warning badges.
+- Launching the tool implicitly authorizes creation of the `logs/` directory and session
+  audit log file; no separate confirmation is required for audit log setup.
+- Logging uses dual channels: stderr for step-level progress; `logs/*.txt` for the
+  complete timestamped audit trail.

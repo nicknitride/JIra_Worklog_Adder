@@ -1,1 +1,20 @@
+# Secrets and session output
+.env
+logs/
 google_api_oauth_details.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+*.egg-info/
+
+# Universal
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
