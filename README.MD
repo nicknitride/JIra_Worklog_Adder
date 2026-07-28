@@ -1,5 +1,7 @@
 # Jira Calendar Worklog Automater
 
+Author Note (nicknitride): Made mostly for convenience, UI/UX needs improvement 
+
 An interactive terminal tool for turning Google Calendar events into Jira worklogs.
 It connects to Jira Cloud and Google Calendar, lets you choose viable worklogging
 days, select calendar events, map each event to a Jira ticket bucket, preview the
