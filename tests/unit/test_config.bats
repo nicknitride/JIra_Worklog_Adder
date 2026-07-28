@@ -28,6 +28,7 @@ ATLASSIAN_API_TOKEN=
 ATLASSIAN_BASE_URL=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
+JIRA_BUCKET_PARENT=
 EOF
     config_load_dotenv "$WORKLOG_ENV_FILE"
     run config_validate
@@ -41,6 +42,7 @@ ATLASSIAN_API_TOKEN=your-atlassian-api-token
 ATLASSIAN_BASE_URL=https://myntfintech.atlassian.net
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
+JIRA_BUCKET_PARENT=your-jira-parent
 EOF
     config_load_dotenv "$WORKLOG_ENV_FILE"
     run config_validate
@@ -54,14 +56,28 @@ ATLASSIAN_API_TOKEN=ATATTreal-token
 ATLASSIAN_BASE_URL=https://myntfintech.atlassian.net
 GOOGLE_CLIENT_ID=123456.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-real-secret
+JIRA_BUCKET_PARENT=https://myntfintech.atlassian.net/browse/TRIBE06-67802
 EOF
     config_load_dotenv "$WORKLOG_ENV_FILE"
     run config_validate
     [[ "$status" -eq 0 ]]
-    [[ "$JIRA_LOGGING_LABEL" == DLV-133* ]]
+    [[ "$JIRA_BUCKET_PARENT_KEY" == "TRIBE06-67802" ]]
 }
 
-@test "config_compute_logging_label follows DLV-133 pattern" {
-    label="$(config_compute_logging_label)"
-    [[ "$label" =~ ^DLV-133\ [0-9]{4}-[A-Za-z]+$ ]]
+@test "config_parse_jira_issue_ref accepts browse URL" {
+    key="$(config_parse_jira_issue_ref "https://myntfintech.atlassian.net/browse/TRIBE06-67802")"
+    [[ "$key" == "TRIBE06-67802" ]]
+}
+
+@test "config_parse_jira_issue_ref accepts issue key" {
+    key="$(config_parse_jira_issue_ref "TRIBE06-67802")"
+    [[ "$key" == "TRIBE06-67802" ]]
+}
+
+@test "config_current_week_range returns monday through sunday in order" {
+    run bash -c 'source "'"${PROJECT_ROOT}"'/lib/config.sh"; config_current_week_range'
+    [[ "$status" -eq 0 ]]
+    local week_start="${output%% *}"
+    local week_end="${output##* }"
+    [[ "$week_start" < "$week_end" || "$week_start" == "$week_end" ]]
 }

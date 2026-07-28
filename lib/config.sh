@@ -12,9 +12,9 @@ export GOOGLE_CLIENT_ID=""
 export GOOGLE_CLIENT_SECRET=""
 export GOOGLE_REFRESH_TOKEN=""
 export JIRA_PROJECT_KEY="TRIBE06"
-export JIRA_BOARD_ID="4912"
+export JIRA_BUCKET_PARENT=""
+export JIRA_BUCKET_PARENT_KEY=""
 export GOOGLE_CALENDAR_ID="primary"
-export JIRA_LOGGING_LABEL=""
 export GOOGLE_OAUTH_PORT="${GOOGLE_OAUTH_PORT:-8080}"
 
 config_is_placeholder() {
@@ -28,10 +28,25 @@ config_is_placeholder() {
     return 1
 }
 
-config_compute_logging_label() {
-    local month_name
-    month_name="$(date '+%B')"
-    printf 'DLV-133 %s-%s' "$(date '+%Y')" "$month_name"
+config_parse_jira_issue_ref() {
+    local input="$1"
+    local key=""
+
+    input="$(printf '%s' "$input" | tr -d '[:space:]')"
+    if [[ -z "$input" ]]; then
+        return 1
+    fi
+
+    if [[ "$input" =~ /browse/([A-Z][A-Z0-9]+-[0-9]+) ]]; then
+        key="${BASH_REMATCH[1]}"
+    elif [[ "$input" =~ ^([A-Z][A-Z0-9]+-[0-9]+)$ ]]; then
+        key="${BASH_REMATCH[1]}"
+    else
+        return 1
+    fi
+
+    printf '%s' "$key"
+    return 0
 }
 
 config_load_dotenv() {
@@ -52,7 +67,7 @@ config_validate() {
     local var val
 
     for var in ATLASSIAN_EMAIL ATLASSIAN_API_TOKEN ATLASSIAN_BASE_URL \
-               GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET; do
+               GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET JIRA_BUCKET_PARENT; do
         eval "val=\${${var}:-}"
         if [[ -z "$val" ]]; then
             missing+=("$var")
@@ -77,17 +92,18 @@ config_validate() {
 
     # Defaults for optional vars
     JIRA_PROJECT_KEY="${JIRA_PROJECT_KEY:-TRIBE06}"
-    JIRA_BOARD_ID="${JIRA_BOARD_ID:-4912}"
     GOOGLE_CALENDAR_ID="${GOOGLE_CALENDAR_ID:-primary}"
     GOOGLE_OAUTH_PORT="${GOOGLE_OAUTH_PORT:-8080}"
 
-    if [[ -z "${JIRA_LOGGING_LABEL:-}" ]]; then
-        JIRA_LOGGING_LABEL="$(config_compute_logging_label)"
-    fi
+    JIRA_BUCKET_PARENT_KEY="$(config_parse_jira_issue_ref "$JIRA_BUCKET_PARENT")" || {
+        worklog_error "Invalid JIRA_BUCKET_PARENT: ${JIRA_BUCKET_PARENT}"
+        printf 'Use a Jira issue key (e.g. TRIBE06-67802) or browse URL.\n' >&2
+        return 2
+    }
 
     export ATLASSIAN_EMAIL ATLASSIAN_API_TOKEN ATLASSIAN_BASE_URL
     export GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REFRESH_TOKEN
-    export JIRA_PROJECT_KEY JIRA_BOARD_ID GOOGLE_CALENDAR_ID JIRA_LOGGING_LABEL GOOGLE_OAUTH_PORT
+    export JIRA_PROJECT_KEY JIRA_BUCKET_PARENT JIRA_BUCKET_PARENT_KEY GOOGLE_CALENDAR_ID GOOGLE_OAUTH_PORT
     return 0
 }
 
@@ -120,10 +136,18 @@ config_current_week_range() {
     local monday sunday
     if [[ -n "$tz" ]]; then
         monday="$(TZ="$tz" date -v-monday '+%Y-%m-%d' 2>/dev/null || TZ="$tz" date -d 'monday this week' '+%Y-%m-%d')"
-        sunday="$(TZ="$tz" date -v-sunday '+%Y-%m-%d' 2>/dev/null || TZ="$tz" date -d 'sunday this week' '+%Y-%m-%d')"
+        if date -v-monday >/dev/null 2>&1; then
+            sunday="$(TZ="$tz" date -j -f '%Y-%m-%d' -v+6d "$monday" '+%Y-%m-%d')"
+        else
+            sunday="$(TZ="$tz" date -d 'sunday this week' '+%Y-%m-%d')"
+        fi
     else
         monday="$(date -v-monday '+%Y-%m-%d' 2>/dev/null || date -d 'monday this week' '+%Y-%m-%d')"
-        sunday="$(date -v-sunday '+%Y-%m-%d' 2>/dev/null || date -d 'sunday this week' '+%Y-%m-%d')"
+        if date -v-monday >/dev/null 2>&1; then
+            sunday="$(date -j -f '%Y-%m-%d' -v+6d "$monday" '+%Y-%m-%d')"
+        else
+            sunday="$(date -d 'sunday this week' '+%Y-%m-%d')"
+        fi
     fi
     printf '%s %s' "$monday" "$sunday"
 }

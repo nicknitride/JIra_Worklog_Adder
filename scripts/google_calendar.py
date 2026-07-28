@@ -103,6 +103,14 @@ def cmd_events(args: argparse.Namespace) -> int:
         scopes=SCOPES,
     )
     try:
+        from google.auth.transport.requests import Request
+
+        if not creds.valid:
+            if not creds.refresh_token:
+                print("No refresh token available. Re-run OAuth.", file=sys.stderr)
+                return 2
+            creds.refresh(Request())
+
         service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         time_min = datetime.combine(date.fromisoformat(args.date_from), datetime.min.time()).isoformat() + "Z"
         end_date = date.fromisoformat(args.date_to) + timedelta(days=1)

@@ -3,6 +3,10 @@
 
 TUI_THEME_FOREGROUND="#0066CC"
 TUI_THEME=""
+TUI_VIABLE_DATES=()
+TUI_SELECTED_EVENTS_JSON="[]"
+TUI_MAPPINGS_JSON="[]"
+TUI_PICKED_TICKET=""
 
 tui_require_gum() {
     if ! command -v gum >/dev/null 2>&1; then
@@ -17,53 +21,68 @@ tui_init_theme() {
     TUI_THEME="--foreground ${TUI_THEME_FOREGROUND}"
 }
 
+# Never write UI to stdout — worklog-tui captures stdout for data in some paths.
+# Use stderr only; avoid /dev/tty (breaks Cursor's integrated terminal).
+tui_display() {
+    gum style "$@" >&2
+}
+
+tui_println() {
+    printf '\n' >&2
+}
+
+tui_print_list() {
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && printf '  %s\n' "$line" >&2
+    done
+}
+
 tui_show_banner() {
     local banner_file="${WORKLOG_PROJECT_ROOT}/lib/assets/gcash-banner.txt"
     if [[ -f "$banner_file" ]]; then
-        gum style $TUI_THEME "$(cat "$banner_file")"
+        tui_display $TUI_THEME "$(cat "$banner_file")"
     fi
-    gum style $TUI_THEME --bold "Jira Calendar Worklog TUI"
-    printf '\n'
+    tui_display $TUI_THEME --bold "Jira Calendar Worklog TUI"
+    tui_println
 }
 
 tui_welcome() {
     tui_show_banner
-    gum style $TUI_THEME "Welcome! Connect to Jira and Google Calendar to log work from your calendar."
-    printf '\n'
+    tui_display $TUI_THEME "Welcome! Connect to Jira and Google Calendar to log work from your calendar."
+    tui_println
 }
 
 tui_connection_status() {
     local jira_status="$1"
     local google_status="$2"
-    gum style $TUI_THEME --bold "Connection Status"
-    gum style $TUI_THEME "Jira:    ${jira_status}"
-    gum style $TUI_THEME "Google:  ${google_status}"
-    printf '\n'
+    tui_display $TUI_THEME --bold "Connection Status"
+    tui_display $TUI_THEME "Jira:    ${jira_status}"
+    tui_display $TUI_THEME "Google:  ${google_status}"
+    tui_println
 }
 
-tui_sprint_tickets() {
+tui_bucket_tickets() {
     local tickets_json="$1"
     local count
     count="$(printf '%s' "$tickets_json" | jq 'length')"
-    gum style $TUI_THEME --bold "Sprint Logging Tickets (label: ${JIRA_LOGGING_LABEL})"
+    tui_display $TUI_THEME --bold "Worklog Buckets (subtasks of ${JIRA_BUCKET_PARENT_KEY})"
+    tui_display $TUI_THEME "${JIRA_BUCKET_PARENT_KEY} — ${JIRA_BUCKET_PARENT_SUMMARY}"
     if [[ "$count" -eq 0 ]]; then
-        gum style $TUI_THEME --foreground "#FF6600" \
-            "No tickets found with label ${JIRA_LOGGING_LABEL}. You can enter ticket keys manually later."
-        worklog_audit "WARN" "tui.sprint.empty" "tickets" "empty" "label=${JIRA_LOGGING_LABEL}"
+        tui_display $TUI_THEME --foreground "#FF6600" \
+            "No subtasks found under ${JIRA_BUCKET_PARENT_KEY}. You can enter ticket keys manually later."
+        worklog_audit "WARN" "tui.bucket.empty" "subtasks" "empty" "parent=${JIRA_BUCKET_PARENT_KEY}"
         return 0
     fi
-    printf '%s' "$tickets_json" | jq -r '.[] | "\(.key) — \(.summary) [\(.status)]"' | \
-        while IFS= read -r line; do
-            gum style $TUI_THEME "$line"
-        done
-    worklog_audit "INFO" "tui.sprint.display" "tickets" "success" "count=${count}"
-    printf '\n'
+    printf '%s' "$tickets_json" | jq -r '.[] | "\(.key) — \(.summary) [\(.status)]"' | tui_print_list
+    worklog_audit "INFO" "tui.bucket.display" "subtasks" "success" "count=${count}"
+    tui_println
 }
 
 tui_day_selection() {
     local week_start="$1"
     local week_end="$2"
-    gum style $TUI_THEME --bold "Select Viable Days (${week_start} to ${week_end})"
+    tui_display $TUI_THEME --bold "Select Viable Days (${week_start} to ${week_end})"
 
     local adjust
     if gum confirm "Adjust date range before selecting days?"; then
@@ -72,10 +91,13 @@ tui_day_selection() {
         worklog_audit "INFO" "tui.day.range_adjust" "dates" "success" "${week_start}..${week_end}"
     fi
 
-    local -a viable_dates=()
-    local d dow label choice
+    local -a viable_dates=() all_dates=()
+    local d dow label
     while IFS= read -r d; do
-        [[ -z "$d" ]] && continue
+        [[ -n "$d" ]] && all_dates+=("$d")
+    done < <(config_dates_between "$week_start" "$week_end")
+
+    for d in "${all_dates[@]}"; do
         dow="$(config_day_of_week "$d")"
         label="${d} (${dow})"
         if gum confirm "Mark ${label} as viable for worklogging?"; then
@@ -84,15 +106,15 @@ tui_day_selection() {
         else
             worklog_audit "INFO" "tui.day.toggle" "$d" "skipped" "day=${dow}"
         fi
-    done < <(config_dates_between "$week_start" "$week_end")
+    done
 
     if [[ ${#viable_dates[@]} -eq 0 ]]; then
-        gum style $TUI_THEME --foreground "#FF6600" "No viable days selected. Please select at least one day."
+        tui_display $TUI_THEME --foreground "#FF6600" "No viable days selected. Please select at least one day."
         worklog_audit "WARN" "tui.day.selection" "days" "empty" "no viable days"
         return 1
     fi
 
-    printf '%s\n' "${viable_dates[@]}"
+    TUI_VIABLE_DATES=("${viable_dates[@]}")
     return 0
 }
 
@@ -115,11 +137,11 @@ tui_event_selection() {
     local count
     count="$(printf '%s' "$events_json" | jq 'length')"
 
-    gum style $TUI_THEME --bold "Select Calendar Events"
+    tui_display $TUI_THEME --bold "Select Calendar Events"
     if [[ "$count" -eq 0 ]]; then
-        gum style $TUI_THEME "No eligible events found for viable days."
+        tui_display $TUI_THEME "No eligible events found for viable days."
         worklog_audit "INFO" "tui.event.empty" "events" "empty" "no events"
-        printf '[]'
+        TUI_SELECTED_EVENTS_JSON="[]"
         return 0
     fi
 
@@ -138,7 +160,7 @@ tui_event_selection() {
     selected="$(gum choose --no-limit "${choices[@]}")" || true
     if [[ -z "$selected" ]]; then
         worklog_audit "INFO" "tui.event.select" "events" "skipped" "none selected"
-        printf '[]'
+        TUI_SELECTED_EVENTS_JSON="[]"
         return 0
     fi
 
@@ -154,8 +176,8 @@ tui_event_selection() {
         done
     done <<< "$selected"
 
-    printf '%s' "$events_json" | jq --argjson sel "$(printf '%s\n' "${selected_ids[@]}" | jq -R . | jq -s .)" \
-        '[.[] | select(.id as $id | $sel | index($id)) | . + {selected: true}]'
+    TUI_SELECTED_EVENTS_JSON="$(printf '%s' "$events_json" | jq --argjson sel "$(printf '%s\n' "${selected_ids[@]}" | jq -R . | jq -s .)" \
+        '[.[] | select(.id as $id | $sel | index($id)) | . + {selected: true}]')"
 }
 
 tui_pick_ticket() {
@@ -164,7 +186,7 @@ tui_pick_ticket() {
     local count ticket_keys choice manual
 
     count="$(printf '%s' "$tickets_json" | jq 'length')"
-    gum style $TUI_THEME --bold "Assign ticket for: ${event_title}"
+    tui_display $TUI_THEME --bold "Assign ticket for: ${event_title}"
 
     if [[ "$count" -gt 0 ]]; then
         ticket_keys=()
@@ -174,18 +196,18 @@ tui_pick_ticket() {
         choice="$(gum choose "${ticket_keys[@]}" "Enter ticket key manually...")" || true
         if [[ "$choice" == "Enter ticket key manually..." || -z "$choice" ]]; then
             manual="$(gum input --placeholder "TRIBE06-12345")"
-            printf '%s' "$manual"
+            TUI_PICKED_TICKET="$manual"
             worklog_audit "INFO" "tui.ticket.manual" "$manual" "selected" "event=${event_title}"
             return 0
         fi
-        printf '%s' "$choice" | awk '{print $1}'
-        worklog_audit "INFO" "tui.ticket.assign" "$(printf '%s' "$choice" | awk '{print $1}')" "selected" "event=${event_title}"
+        TUI_PICKED_TICKET="$(printf '%s' "$choice" | awk '{print $1}')"
+        worklog_audit "INFO" "tui.ticket.assign" "$TUI_PICKED_TICKET" "selected" "event=${event_title}"
         return 0
     fi
 
     manual="$(gum input --placeholder "Enter Jira ticket key (e.g. TRIBE06-67802)")"
     worklog_audit "INFO" "tui.ticket.manual" "$manual" "selected" "event=${event_title}"
-    printf '%s' "$manual"
+    TUI_PICKED_TICKET="$manual"
 }
 
 tui_validate_ticket_key() {
@@ -196,15 +218,15 @@ tui_validate_ticket_key() {
     esac
 }
 
-tui_check_out_of_sprint() {
+tui_check_out_of_buckets() {
     local ticket_key="$1"
-    if jira_ticket_in_sprint "$ticket_key"; then
+    if jira_ticket_in_buckets "$ticket_key"; then
         return 0
     fi
-    gum style $TUI_THEME --foreground "#FF6600" \
-        "Warning: ${ticket_key} is not in the active sprint with label ${JIRA_LOGGING_LABEL}."
-    worklog_audit "WARN" "tui.ticket.out_of_sprint" "$ticket_key" "warning" "requires confirm"
-    confirm_action "Submit worklog to out-of-sprint ticket ${ticket_key}?"
+    tui_display $TUI_THEME --foreground "#FF6600" \
+        "Warning: ${ticket_key} is not a subtask of ${JIRA_BUCKET_PARENT_KEY}."
+    worklog_audit "WARN" "tui.ticket.out_of_bucket" "$ticket_key" "warning" "requires confirm"
+    confirm_action "Submit worklog to ticket outside bucket list (${ticket_key})?"
 }
 
 tui_build_mappings() {
@@ -214,24 +236,25 @@ tui_build_mappings() {
 
     count="$(printf '%s' "$selected_events" | jq 'length')"
     if [[ "$count" -eq 0 ]]; then
-        printf '[]'
+        TUI_MAPPINGS_JSON="[]"
         return 0
     fi
 
     for (( i=0; i<count; i++ )); do
         event="$(printf '%s' "$selected_events" | jq -c ".[$i]")"
         title="$(printf '%s' "$event" | jq -r '.title')"
-        ticket="$(tui_pick_ticket "$title" "$tickets_json")"
+        tui_pick_ticket "$title" "$tickets_json"
+        ticket="$TUI_PICKED_TICKET"
         if [[ -z "$ticket" ]]; then
             worklog_audit "WARN" "tui.ticket.assign" "event" "skipped" "no ticket for ${title}"
             continue
         fi
         ticket="$(printf '%s' "$ticket" | awk '{print $1}')"
         if ! tui_validate_ticket_key "$ticket"; then
-            gum style $TUI_THEME --foreground "#FF6600" "Invalid ticket key: ${ticket}"
+            tui_display $TUI_THEME --foreground "#FF6600" "Invalid ticket key: ${ticket}"
             continue
         fi
-        tui_check_out_of_sprint "$ticket" || continue
+        tui_check_out_of_buckets "$ticket" || continue
         mappings="$(printf '%s' "$mappings" | jq \
             --argjson ev "$event" \
             --arg tk "$ticket" \
@@ -239,13 +262,15 @@ tui_build_mappings() {
                 eventId: $ev.id,
                 eventTitle: $ev.title,
                 ticketKey: $tk,
+                startTime: $ev.startTime,
+                endTime: $ev.endTime,
                 durationMinutes: ($ev.durationMinutes | tonumber),
                 workDate: ($ev.startTime[0:10]),
                 description: $ev.title,
                 status: "pending"
             }]')"
     done
-    printf '%s' "$mappings"
+    TUI_MAPPINGS_JSON="$mappings"
 }
 
 tui_submission_preview() {
@@ -253,16 +278,14 @@ tui_submission_preview() {
     local count
     count="$(printf '%s' "$mappings" | jq 'length')"
 
-    gum style $TUI_THEME --bold "Worklog Submission Preview"
+    tui_display $TUI_THEME --bold "Worklog Submission Preview"
     if [[ "$count" -eq 0 ]]; then
-        gum style $TUI_THEME "No worklog entries to submit."
+        tui_display $TUI_THEME "No worklog entries to submit."
         return 1
     fi
 
-    printf '%s' "$mappings" | jq -r '.[] | "\(.ticketKey): \(.eventTitle) — \(.durationMinutes)m on \(.workDate)"' | \
-        while IFS= read -r line; do
-            gum style $TUI_THEME "$line"
-        done
+    printf '%s' "$mappings" | jq -r '.[] |
+        "\(.ticketKey): \(.eventTitle) — \(.durationMinutes)m | \(.startTime[11:16])-\(.endTime[11:16]) on \(.workDate)"' | tui_print_list
 
     # 8-hour daily warning (FR-008a)
     local over_days
@@ -273,16 +296,16 @@ tui_submission_preview() {
         .[] | "\(.date): \(.total)m (\((.total / 60 * 10 | floor) / 10)h)"
     ')"
     if [[ -n "$over_days" ]]; then
-        gum style $TUI_THEME --foreground "#FF6600" "Warning: Daily mapped time exceeds 8 hours:"
+        tui_display $TUI_THEME --foreground "#FF6600" "Warning: Daily mapped time exceeds 8 hours:"
         while IFS= read -r line; do
-            [[ -n "$line" ]] && gum style $TUI_THEME --foreground "#FF6600" "  $line"
+            [[ -n "$line" ]] && printf '  %s\n' "$line" >&2
         done <<< "$over_days"
         worklog_audit "WARN" "tui.preview.over8h" "mappings" "warning" "$over_days"
     fi
 
-    printf '\n'
+    tui_println
     if [[ "$WORKLOG_DRY_RUN" == "1" ]]; then
-        gum style $TUI_THEME "[DRY-RUN] No worklogs will be submitted."
+        tui_display $TUI_THEME "[DRY-RUN] No worklogs will be submitted."
     fi
 
     confirm_action "Submit ${count} worklog(s) to Jira?"
@@ -293,7 +316,8 @@ tui_map_and_submit() {
     local tickets_json="$2"
     local mappings result i count mapping
 
-    mappings="$(tui_build_mappings "$selected_events" "$tickets_json")"
+    tui_build_mappings "$selected_events" "$tickets_json"
+    mappings="$TUI_MAPPINGS_JSON"
     if ! tui_submission_preview "$mappings"; then
         worklog_audit "INFO" "tui.submit" "worklogs" "declined" "user declined preview"
         return 4
@@ -302,12 +326,14 @@ tui_map_and_submit() {
     count="$(printf '%s' "$mappings" | jq 'length')"
     for (( i=0; i<count; i++ )); do
         mapping="$(printf '%s' "$mappings" | jq -c ".[$i]")"
+        local started
+        started="$(jira_format_worklog_started "$(printf '%s' "$mapping" | jq -r '.startTime')")"
         jira_submit_worklog \
             "$(printf '%s' "$mapping" | jq -r '.ticketKey')" \
             "$(printf '%s' "$mapping" | jq -r '.eventTitle')" \
-            "$(printf '%s' "$mapping" | jq -r '.workDate')T09:00:00.000+0000')" \
+            "$started" \
             "$(printf '%s' "$mapping" | jq -r '.durationMinutes')" || true
     done
-    gum style $TUI_THEME "Done!"
+    tui_display $TUI_THEME "Done!"
     return 0
 }

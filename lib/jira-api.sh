@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Jira REST API integration via curl + jq.
 
-JIRA_SPRINT_TICKETS_JSON="[]"
-JIRA_SPRINT_TICKET_KEYS=()
+JIRA_BUCKET_TICKETS_JSON="[]"
+JIRA_BUCKET_TICKET_KEYS=()
+JIRA_BUCKET_PARENT_SUMMARY=""
 
 jira_curl() {
     local method="$1"
@@ -66,68 +67,86 @@ jira_fetch_with_retry() {
     printf '%s' "$body"
 }
 
-jira_fetch_sprint_tickets() {
-    worklog_audit "INFO" "jira.sprint.load" "board/${JIRA_BOARD_ID}" "pending" ""
-    local result http_code body sprint_id
-    result="$(jira_fetch_with_retry GET "/rest/agile/1.0/board/${JIRA_BOARD_ID}/sprint?state=active")"
+jira_normalize_bucket_tickets() {
+    local body="$1"
+    printf '%s' "$body" | jq '[.issues[]? | {
+        key: .key,
+        summary: (.fields.summary // "(no summary)"),
+        status: (.fields.status.name // "unknown"),
+        inBucket: true
+    }]'
+}
+
+jira_fetch_bucket_tickets() {
+    worklog_audit "INFO" "jira.bucket.load" "parent/${JIRA_BUCKET_PARENT_KEY}" "pending" ""
+    local result http_code body count payload
+
+    result="$(jira_fetch_with_retry GET "/rest/api/3/issue/${JIRA_BUCKET_PARENT_KEY}?fields=summary,subtasks")"
     http_code="$(printf '%s' "$result" | head -n1)"
     body="$(printf '%s' "$result" | tail -n +2)"
 
     if [[ "$http_code" != "200" ]]; then
-        worklog_audit "ERROR" "jira.sprint.load" "board/${JIRA_BOARD_ID}" "failure" "HTTP ${http_code}"
-        worklog_error "Failed to fetch active sprint (HTTP ${http_code})"
+        worklog_audit "ERROR" "jira.bucket.load" "parent/${JIRA_BUCKET_PARENT_KEY}" "failure" "HTTP ${http_code}"
+        worklog_error "Failed to fetch parent issue ${JIRA_BUCKET_PARENT_KEY} (HTTP ${http_code})"
         return 5
     fi
 
-    sprint_id="$(printf '%s' "$body" | jq -r '.values[0].id // empty')"
-    if [[ -z "$sprint_id" ]]; then
-        worklog_audit "WARN" "jira.sprint.load" "board/${JIRA_BOARD_ID}" "empty" "no active sprint"
-        JIRA_SPRINT_TICKETS_JSON="[]"
-        JIRA_SPRINT_TICKET_KEYS=()
-        return 0
+    JIRA_BUCKET_PARENT_SUMMARY="$(printf '%s' "$body" | jq -r '.fields.summary // "unknown"')"
+    worklog_audit "INFO" "jira.bucket.load" "parent/${JIRA_BUCKET_PARENT_KEY}" "success" \
+        "summary=${JIRA_BUCKET_PARENT_SUMMARY}"
+
+    JIRA_BUCKET_TICKETS_JSON="$(printf '%s' "$body" | jq '[.fields.subtasks[]? | {
+        key: .key,
+        summary: (.fields.summary // "(no summary)"),
+        status: (.fields.status.name // "unknown"),
+        inBucket: true
+    }]')"
+
+    count="$(printf '%s' "$JIRA_BUCKET_TICKETS_JSON" | jq 'length')"
+    if [[ "$count" -eq 0 ]]; then
+        payload="$(jq -n --arg parent "$JIRA_BUCKET_PARENT_KEY" \
+            '{jql: ("parent = " + $parent + " ORDER BY key ASC"), maxResults: 100, fields: ["summary", "status"]}')"
+        result="$(jira_fetch_with_retry POST "/rest/api/3/search" "$payload")"
+        http_code="$(printf '%s' "$result" | head -n1)"
+        body="$(printf '%s' "$result" | tail -n +2)"
+        if [[ "$http_code" != "200" ]]; then
+            worklog_audit "ERROR" "jira.bucket.filter" "subtasks/${JIRA_BUCKET_PARENT_KEY}" "failure" "HTTP ${http_code}"
+            worklog_error "Failed to search subtasks for ${JIRA_BUCKET_PARENT_KEY} (HTTP ${http_code})"
+            return 5
+        fi
+        JIRA_BUCKET_TICKETS_JSON="$(jira_normalize_bucket_tickets "$body")"
+        count="$(printf '%s' "$JIRA_BUCKET_TICKETS_JSON" | jq 'length')"
     fi
 
-    local sprint_name
-    sprint_name="$(printf '%s' "$body" | jq -r '.values[0].name // "unknown"')"
-    worklog_audit "INFO" "jira.sprint.load" "sprint/${sprint_id}" "success" "sprint=${sprint_name}"
+    worklog_audit "INFO" "jira.bucket.filter" "subtasks/${JIRA_BUCKET_PARENT_KEY}" "success" "count=${count}"
 
-    result="$(jira_fetch_with_retry GET "/rest/agile/1.0/sprint/${sprint_id}/issue?maxResults=100")"
-    http_code="$(printf '%s' "$result" | head -n1)"
-    body="$(printf '%s' "$result" | tail -n +2)"
-
-    if [[ "$http_code" != "200" ]]; then
-        worklog_audit "ERROR" "jira.issues.filter" "sprint/${sprint_id}" "failure" "HTTP ${http_code}"
-        return 5
-    fi
-
-    JIRA_SPRINT_TICKETS_JSON="$(printf '%s' "$body" | jq --arg label "$JIRA_LOGGING_LABEL" \
-        '[.issues[] | select(.fields.labels | index($label)) | {
-            key: .key,
-            summary: .fields.summary,
-            labels: .fields.labels,
-            status: .fields.status.name,
-            inActiveSprint: true
-        }]')"
-
-    local count
-    count="$(printf '%s' "$JIRA_SPRINT_TICKETS_JSON" | jq 'length')"
-    worklog_audit "INFO" "jira.issues.filter" "label/${JIRA_LOGGING_LABEL}" "success" "count=${count}"
-
-    JIRA_SPRINT_TICKET_KEYS=()
+    JIRA_BUCKET_TICKET_KEYS=()
     while IFS= read -r key; do
-        [[ -n "$key" ]] && JIRA_SPRINT_TICKET_KEYS+=("$key")
-    done < <(printf '%s' "$JIRA_SPRINT_TICKETS_JSON" | jq -r '.[].key')
+        [[ -n "$key" ]] && JIRA_BUCKET_TICKET_KEYS+=("$key")
+    done < <(printf '%s' "$JIRA_BUCKET_TICKETS_JSON" | jq -r '.[].key')
 
     return 0
 }
 
-jira_ticket_in_sprint() {
+jira_ticket_in_buckets() {
     local ticket_key="$1"
     local key
-    for key in "${JIRA_SPRINT_TICKET_KEYS[@]}"; do
+    for key in "${JIRA_BUCKET_TICKET_KEYS[@]}"; do
         [[ "$key" == "$ticket_key" ]] && return 0
     done
     return 1
+}
+
+jira_format_worklog_started() {
+    local iso_datetime="$1"
+    python3 - "$iso_datetime" <<'PY'
+import sys
+from datetime import datetime
+
+dt = datetime.fromisoformat(sys.argv[1])
+offset = dt.strftime("%z") or "+0000"
+print(dt.strftime(f"%Y-%m-%dT%H:%M:%S.000{offset}"))
+PY
 }
 
 jira_build_worklog_payload() {
@@ -161,12 +180,12 @@ jira_submit_worklog() {
 
     if [[ "$WORKLOG_DRY_RUN" == "1" ]]; then
         worklog_audit "INFO" "jira.worklog.dry_run" "$issue_key" "dry_run" \
-            "title=${title} duration=${duration_minutes}m"
+            "title=${title} started=${started} duration=${duration_minutes}m"
         return 0
     fi
 
     worklog_audit "INFO" "jira.worklog.submit" "$issue_key" "pending" \
-        "title=${title} duration=${duration_minutes}m"
+        "title=${title} started=${started} duration=${duration_minutes}m"
 
     local payload result http_code body
     payload="$(jira_build_worklog_payload "$title" "$started" "$duration_minutes")"
@@ -178,7 +197,7 @@ jira_submit_worklog() {
         local wl_id
         wl_id="$(printf '%s' "$body" | jq -r '.id // "unknown"')"
         worklog_audit "INFO" "jira.worklog.submit" "$issue_key" "success" \
-            "worklog_id=${wl_id} title=${title} duration=${duration_minutes}m"
+            "worklog_id=${wl_id} title=${title} started=${started} duration=${duration_minutes}m"
         return 0
     fi
 

@@ -74,8 +74,11 @@ calendar_fetch_events_raw() {
         --client-secret "$GOOGLE_CLIENT_SECRET" 2>&1)"
     exit_code=$?
     if [[ $exit_code -ne 0 ]]; then
-        worklog_audit "ERROR" "google.calendar.fetch" "${date_from}..${date_to}" "failure" "exit=${exit_code}"
-        worklog_error "Failed to fetch calendar events"
+        local err_detail
+        err_detail="$(printf '%s' "$result" | sed '/^exit=/d' | tail -n1 | tr -d '\n')"
+        worklog_audit "ERROR" "google.calendar.fetch" "${date_from}..${date_to}" "failure" \
+            "exit=${exit_code} detail=${err_detail:-unknown}"
+        worklog_error "Failed to fetch calendar events: ${err_detail:-exit ${exit_code}}"
         return 3
     fi
     local json_line

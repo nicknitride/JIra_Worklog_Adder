@@ -111,7 +111,7 @@ worklog_main() {
     tui_init_theme
     tui_welcome
 
-    # US1: Connect and sprint context
+    # US1: Connect and bucket context
     if ! jira_validate_auth; then
         exit 3
     fi
@@ -124,37 +124,34 @@ worklog_main() {
 
     tui_connection_status "connected" "$google_status"
 
-    if ! jira_fetch_sprint_tickets; then
+    if ! jira_fetch_bucket_tickets; then
         exit 5
     fi
-    tui_sprint_tickets "$JIRA_SPRINT_TICKETS_JSON"
+    tui_bucket_tickets "$JIRA_BUCKET_TICKETS_JSON"
 
     # US2: Day selection
-    local week_range week_start week_end viable_output
+    local week_range week_start week_end
     week_range="$(config_current_week_range)"
     week_start="${week_range%% *}"
     week_end="${week_range##* }"
 
-    viable_output="$(tui_day_selection "$week_start" "$week_end")" || exit 4
-    local -a viable_dates=()
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && viable_dates+=("$line")
-    done <<< "$viable_output"
+    tui_day_selection "$week_start" "$week_end" || exit 4
+    local -a viable_dates=("${TUI_VIABLE_DATES[@]}")
 
     local events_json
     events_json="$(calendar_fetch_events_for_days "${viable_dates[@]}")" || exit 3
 
     # US3: Event selection and mapping
-    local selected_events
-    selected_events="$(tui_event_selection "$events_json")"
+    tui_event_selection "$events_json"
+    local selected_events="$TUI_SELECTED_EVENTS_JSON"
 
     if [[ "$(printf '%s' "$selected_events" | jq 'length')" -gt 0 ]]; then
-        tui_map_and_submit "$selected_events" "$JIRA_SPRINT_TICKETS_JSON" || {
+        tui_map_and_submit "$selected_events" "$JIRA_BUCKET_TICKETS_JSON" || {
             exit_code=$?
             [[ $exit_code -eq 4 ]] && exit 4
         }
     else
-        gum style $TUI_THEME "No events selected. Exiting without submitting worklogs."
+        tui_display $TUI_THEME "No events selected. Exiting without submitting worklogs."
         worklog_audit "INFO" "tui.submit" "worklogs" "skipped" "no events selected"
     fi
 
