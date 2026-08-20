@@ -203,6 +203,14 @@ tui_worklog_tickets_overview() {
     tui_println
 }
 
+tui_logging_mode(){
+    gum choose \
+    --header "Select a logging mode" \
+    "Log Today" \
+    "Select a date range"
+    return 0
+}
+
 tui_day_selection() {
     local week_start="$1"
     local week_end="$2"

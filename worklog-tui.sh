@@ -144,7 +144,22 @@ worklog_main() {
     week_start="${week_range%% *}"
     week_end="${week_range##* }"
 
-    tui_day_selection "$week_start" "$week_end" || exit 4
+    local logging_mode
+    logging_mode="$(tui_logging_mode)"
+    worklog_audit "INFO" "tui.day.select_log_mode" "mode" "select success" "$logging_mode for $(date +%Y-%m-%d)"
+    case "$logging_mode" in
+        "Log Today")
+            TUI_VIABLE_DATES=("$(date +%Y-%m-%d)")
+            ;;
+
+        "Select a date range")
+            tui_day_selection "$week_start" "$week_end" || exit 4
+            ;;
+
+        *)
+            exit 4
+            ;;
+    esac
     local -a viable_dates=("${TUI_VIABLE_DATES[@]}")
 
     local events_json
