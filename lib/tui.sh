@@ -21,6 +21,7 @@ tui_require_gum() {
 
 tui_init_theme() {
     tui_require_gum
+    export CLICOLOR_FORCE=1
     export GUM_CONFIRM_DEFAULT=false
     TUI_THEME="--foreground ${TUI_THEME_FOREGROUND}"
 }
